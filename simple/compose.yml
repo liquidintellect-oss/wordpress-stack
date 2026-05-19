@@ -8,7 +8,8 @@ services:
         PHP_MAX_UPLOAD: ${WP_MAX_UPLOAD:-100M}
         PHP_MAX_FILESIZE: ${WP_MAX_FILESIZE:-100M}
     ports:
-      - ${WP_HOST_PORT:-8080}:80
+      - "${WP_HTTP_PORT:-80}:80"
+      - "${WP_HTTPS_PORT:-443}:443"
     environment:
       WORDPRESS_DB_HOST: maria_db
       WORDPRESS_DB_USER: ${WP_DB_USER:-my_db_user}

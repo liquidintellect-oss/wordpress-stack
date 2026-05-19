@@ -1,0 +1,119 @@
+name: ${WP_STACK_NAME:-my-wordpress-stack}
+
+services:
+
+  # ─── Nginx reverse proxy ───────────────────────────────────────────────────
+  nginx:
+    build:
+      context: ./nginx
+      dockerfile: Dockerfile
+    container_name: wp_nginx
+    restart: unless-stopped
+    stop_grace_period: 5s       # nginx fast-shutdown responds to SIGTERM quickly
+    ports:
+      - "${WP_HTTP_PORT:-80}:80"
+      - "${WP_HTTPS_PORT:-443}:443"
+    environment:
+      WP_HTTPS_PORT: ${WP_HTTPS_PORT:-443}
+      WP_MAX_UPLOAD: ${WP_MAX_UPLOAD:-64M}
+    volumes:
+      - wp_data:/var/www/html:ro          # serve static files directly
+      - ./nginx/templates:/etc/nginx/templates:ro  # envsubst processed → conf.d/ at startup
+      - ./nginx/fastcgi_cache:/etc/nginx/cache  # FastCGI page cache
+      - ./nginx/generate-cert.sh:/docker-entrypoint.d/01-generate-cert.sh:ro  # auto self-signed cert
+      - ./certs:/etc/nginx/certs          # TLS certs — real (Certbot) or auto-generated self-signed
+    depends_on:
+      - wordpress
+    networks:
+      - wp_net
+
+  # ─── WordPress (PHP-FPM) ───────────────────────────────────────────────────
+  wordpress:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args:
+        WP_MAX_UPLOAD: ${WP_MAX_UPLOAD:-64M}
+        WP_MAX_FILESIZE: ${WP_MAX_FILESIZE:-64M}
+    container_name: wp_php
+    restart: unless-stopped
+    init: true                  # tini as PID 1 — ensures SIGTERM reaches php-fpm
+    stop_grace_period: 10s      # give FPM time to finish in-flight requests, then force-kill
+    volumes:
+      - wp_data:/var/www/html
+      - ./php/uploads.ini:/usr/local/etc/php/conf.d/uploads.ini:ro
+      - ./php/opcache.ini:/usr/local/etc/php/conf.d/opcache.ini:ro
+      - ./php/zz-fpm.conf:/usr/local/etc/php-fpm.d/zz-docker.conf:ro
+    environment:
+      WORDPRESS_DB_HOST: db:3306
+      WORDPRESS_DB_USER: ${WP_DB_USER:-wordpress}
+      WORDPRESS_DB_PASSWORD: ${WP_DB_PASSWORD:?WP_DB_PASSWORD is required}
+      WORDPRESS_DB_NAME: ${WP_DB_NAME:-wordpress}
+      WORDPRESS_TABLE_PREFIX: ${WP_TABLE_PREFIX:-wp_}
+      WORDPRESS_CONFIG_EXTRA: |
+        /* Redis object cache */
+        define( 'WP_REDIS_HOST', 'redis' );
+        define( 'WP_REDIS_PORT', 6379 );
+        define( 'WP_CACHE', true );
+        /* Performance */
+        define( 'CONCATENATE_SCRIPTS', false );
+        define( 'WP_MEMORY_LIMIT', '256M' );
+        define( 'WP_MAX_MEMORY_LIMIT', '512M' );
+        /* Disable file-editor in production */
+        define( 'DISALLOW_FILE_EDIT', true );
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    networks:
+      - wp_net
+
+  # ─── MariaDB ───────────────────────────────────────────────────────────────
+  db:
+    image: mariadb:lts
+    container_name: wp_db
+    restart: unless-stopped
+    volumes:
+      - db_data:/var/lib/mysql
+      - ./mysql/my.cnf:/etc/mysql/conf.d/tuning.cnf:ro
+    environment:
+      MARIADB_DATABASE: ${WP_DB_NAME:-wordpress}
+      MARIADB_USER: ${WP_DB_USER:-wordpress}
+      MARIADB_PASSWORD: ${WP_DB_PASSWORD:?WP_DB_PASSWORD is required}
+      MARIADB_ROOT_PASSWORD: ${WP_DB_ROOT_PASSWORD:?WP_DB_ROOT_PASSWORD is required}
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - wp_net
+
+  # ─── Redis object cache ────────────────────────────────────────────────────
+  redis:
+    image: redis:alpine
+    container_name: wp_redis
+    restart: unless-stopped
+    command: >
+      redis-server
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+      --save ""
+      --appendonly no
+    volumes:
+      - redis_data:/data
+    networks:
+      - wp_net
+
+volumes:
+  db_data:
+    name: ${WP_DB_VOLUME_NAME:-my_wp_maria_sql_data}
+  wp_data:
+    name: ${WP_HTML_VOLUME_NAME:-my_wp_html_data}
+  redis_data:
+    name: ${WP_REDIS_VOLUME_NAME:-my_redis_data}
+  
+networks:
+  wp_net:
+    driver: bridge
