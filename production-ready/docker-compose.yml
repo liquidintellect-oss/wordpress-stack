@@ -7,7 +7,6 @@ services:
     build:
       context: ./nginx
       dockerfile: Dockerfile
-    container_name: wp_nginx
     restart: unless-stopped
     stop_grace_period: 5s       # nginx fast-shutdown responds to SIGTERM quickly
     ports:
@@ -35,7 +34,6 @@ services:
       args:
         WP_MAX_UPLOAD: ${WP_MAX_UPLOAD:-64M}
         WP_MAX_FILESIZE: ${WP_MAX_FILESIZE:-64M}
-    container_name: wp_php
     restart: unless-stopped
     init: true                  # tini as PID 1 — ensures SIGTERM reaches php-fpm
     stop_grace_period: 10s      # give FPM time to finish in-flight requests, then force-kill
@@ -44,6 +42,7 @@ services:
       - ./php/uploads.ini:/usr/local/etc/php/conf.d/uploads.ini:ro
       - ./php/opcache.ini:/usr/local/etc/php/conf.d/opcache.ini:ro
       - ./php/zz-fpm.conf:/usr/local/etc/php-fpm.d/zz-docker.conf:ro
+      - ./wordpress/mu-plugins:/var/www/html/wp-content/mu-plugins:ro
     environment:
       WORDPRESS_DB_HOST: db:3306
       WORDPRESS_DB_USER: ${WP_DB_USER:-wordpress}
@@ -72,7 +71,6 @@ services:
   # ─── MariaDB ───────────────────────────────────────────────────────────────
   db:
     image: mariadb:lts
-    container_name: wp_db
     restart: unless-stopped
     volumes:
       - db_data:/var/lib/mysql
@@ -93,7 +91,6 @@ services:
   # ─── Redis object cache ────────────────────────────────────────────────────
   redis:
     image: redis:alpine
-    container_name: wp_redis
     restart: unless-stopped
     command: >
       redis-server
@@ -103,6 +100,9 @@ services:
       --appendonly no
     volumes:
       - redis_data:/data
+    depends_on:
+      db:
+        condition: service_healthy
     networks:
       - wp_net
 
@@ -113,7 +113,7 @@ volumes:
     name: ${WP_HTML_VOLUME_NAME:-my_wp_html_data}
   redis_data:
     name: ${WP_REDIS_VOLUME_NAME:-my_redis_data}
-  
+
 networks:
   wp_net:
     driver: bridge
