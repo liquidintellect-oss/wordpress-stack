@@ -1,0 +1,106 @@
+fastcgi_cache_path /etc/nginx/cache
+    levels=1:2
+    keys_zone=WORDPRESS:100m
+    inactive=60m
+    max_size=1g;
+
+fastcgi_cache_key "$scheme$request_method$host$request_uri";
+
+server {
+    listen 80;
+    server_name _;
+
+    # Redirect HTTP → HTTPS using the configured external HTTPS port.
+    # WP_HTTPS_PORT is injected from the .env file via docker-compose envsubst.
+    return 301 https://$host:${WP_HTTPS_PORT}$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    server_name _;
+
+    ssl_certificate     /etc/nginx/certs/fullchain.pem;
+    ssl_certificate_key /etc/nginx/certs/privkey.pem;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_ciphers         HIGH:!aNULL:!MD5;
+    ssl_session_cache   shared:SSL:10m;
+    ssl_session_timeout 10m;
+
+    root  /var/www/html;
+    index index.php;
+
+    # ── FastCGI cache bypass rules ──────────────────────────────────────────
+    set $skip_cache 0;
+
+    # Don't cache POST requests or URLs with query strings
+    if ($request_method = POST)        { set $skip_cache 1; }
+    if ($query_string != "")           { set $skip_cache 1; }
+
+    # Don't cache logged-in users or recent commenters
+    if ($http_cookie ~* "comment_author|wordpress_[a-f0-9]+|wp-postpass|wordpress_no_cache|wordpress_logged_in") {
+        set $skip_cache 1;
+    }
+
+    # Don't cache WooCommerce dynamic pages
+    if ($request_uri ~* "/store.*|/cart.*|/my-account.*|/checkout.*|/addons.*") {
+        set $skip_cache 1;
+    }
+
+    # ── Static assets — served directly, never hit PHP ──────────────────────
+    location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot|webp|avif)$ {
+        expires     max;
+        log_not_found off;
+        access_log  off;
+        add_header  Cache-Control "public, immutable";
+    }
+
+    # ── WordPress rewrites ───────────────────────────────────────────────────
+    location / {
+        try_files $uri $uri/ /index.php?$args;
+    }
+
+    # Block xmlrpc if you don't need it
+    location = /xmlrpc.php {
+        deny all;
+    }
+
+    # ── PHP via FastCGI ──────────────────────────────────────────────────────
+    location ~ \.php$ {
+        try_files $uri =404;
+
+        fastcgi_pass            wordpress:9000;
+        fastcgi_index           index.php;
+        fastcgi_param           SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        include                 fastcgi_params;
+
+        fastcgi_read_timeout    300;
+        fastcgi_buffer_size     16k;
+        fastcgi_buffers         4 16k;
+
+        # FastCGI page caching
+        fastcgi_cache           WORDPRESS;
+        fastcgi_cache_valid      200 301 302 60m;
+        fastcgi_cache_use_stale error timeout updating invalid_header http_500;
+        fastcgi_cache_bypass    $skip_cache;
+        fastcgi_no_cache        $skip_cache;
+        fastcgi_cache_lock      on;
+
+        add_header X-FastCGI-Cache $upstream_cache_status;
+    }
+
+    # ── Security headers ─────────────────────────────────────────────────────
+    add_header X-Frame-Options        "SAMEORIGIN"   always;
+    add_header X-Content-Type-Options "nosniff"      always;
+    add_header Referrer-Policy        "strict-origin" always;
+
+    # ── Gzip ────────────────────────────────────────────────────────────────
+    gzip            on;
+    gzip_comp_level 5;
+    gzip_min_length 256;
+    gzip_types      text/plain text/css application/json application/javascript
+                    text/xml application/xml image/svg+xml;
+    gzip_vary       on;
+
+    # Keep in sync with WP_MAX_UPLOAD in .env
+    client_max_body_size ${WP_MAX_UPLOAD};
+}
